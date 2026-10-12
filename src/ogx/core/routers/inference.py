@@ -80,7 +80,15 @@ class InferenceRouter(Inference):
     ) -> None:
         logger.debug("Initializing InferenceRouter")
         self.routing_table = routing_table
-        self.store = store
+        # CUPOLA PATCH — CUPOLA_INFERENCE_STORE=off: do not record chat
+        # completions (input messages + output) in inference_store.
+        import os as _cupola_os
+
+        if _cupola_os.environ.get("CUPOLA_INFERENCE_STORE", "").strip().lower() == "off":
+            logger.info("Cupola: inference_store disabled (CUPOLA_INFERENCE_STORE=off)")
+            self.store = None
+        else:
+            self.store = store
 
     async def initialize(self) -> None:
         logger.debug("InferenceRouter.initialize")
