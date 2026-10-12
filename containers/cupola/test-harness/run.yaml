@@ -1,0 +1,151 @@
+version: 2
+distro_name: starter
+apis:
+- file_processors
+- files
+- inference
+- responses
+- tool_runtime
+- vector_io
+providers:
+  inference:
+  - provider_id: openai-r429
+    provider_type: remote::openai
+    config:
+      api_key: sk-test-not-a-real-key-0000
+      base_url: "http://127.0.0.1:9999/r429/v1"
+      refresh_models: false
+      allowed_models:
+      - "google/gemma-4-26b-a4b-it:free"
+  - provider_id: openai-r401
+    provider_type: remote::openai
+    config:
+      api_key: sk-test-not-a-real-key-0000
+      base_url: "http://127.0.0.1:9999/r401/v1"
+      refresh_models: false
+      allowed_models:
+      - "m"
+  - provider_id: openai-r403
+    provider_type: remote::openai
+    config:
+      api_key: sk-test-not-a-real-key-0000
+      base_url: "http://127.0.0.1:9999/r403/v1"
+      refresh_models: false
+      allowed_models:
+      - "m"
+  - provider_id: openai-ok
+    provider_type: remote::openai
+    config:
+      api_key: sk-test-not-a-real-key-0000
+      base_url: "http://127.0.0.1:9999/ok/v1"
+      refresh_models: false
+      allowed_models:
+      - "m"
+      - "e"
+  - provider_id: openai-rmid
+    provider_type: remote::openai
+    config:
+      api_key: sk-test-not-a-real-key-0000
+      base_url: "http://127.0.0.1:9999/rmid/v1"
+      refresh_models: false
+      allowed_models:
+      - "m"
+  vector_io:
+  - provider_id: milvus
+    provider_type: inline::milvus
+    config:
+      db_path: /tmp/ogx/milvus.db
+      persistence:
+        namespace: vector_io::milvus
+        backend: kv_default
+  file_processors:
+  - provider_id: pypdf
+    provider_type: inline::pypdf
+    config: {}
+  files:
+  - provider_id: localfs-files
+    provider_type: inline::localfs
+    config:
+      storage_dir: /tmp/ogx/files
+      metadata_store:
+        table_name: files_metadata
+        backend: sql_default
+  responses:
+  - provider_id: builtin
+    provider_type: inline::builtin
+    config:
+      persistence:
+        agent_state:
+          namespace: agents
+          backend: kv_default
+        responses:
+          table_name: responses
+          backend: sql_default
+          max_write_queue_size: 10000
+          num_writers: 4
+  tool_runtime:
+  - provider_id: model-context-protocol
+    provider_type: remote::model-context-protocol
+    config: {}
+  - provider_id: file-search
+    provider_type: inline::file-search
+    config: {}
+storage:
+  backends:
+    kv_default:
+      type: kv_sqlite
+      db_path: /tmp/ogx/kvstore.db
+    sql_default:
+      type: sql_sqlite
+      db_path: /tmp/ogx/sql_store.db
+  stores:
+    metadata:
+      namespace: registry
+      backend: kv_default
+    inference:
+      table_name: inference_store
+      backend: sql_default
+    conversations:
+      table_name: openai_conversations
+      backend: sql_default
+    prompts:
+      namespace: prompts
+      backend: kv_default
+    connectors:
+      namespace: connectors
+      backend: kv_default
+registered_resources:
+  models:
+  - model_id: gemma
+    provider_id: openai-r429
+    provider_model_id: "google/gemma-4-26b-a4b-it:free"
+    model_type: llm
+  - model_id: bad401
+    provider_id: openai-r401
+    provider_model_id: m
+    model_type: llm
+  - model_id: bad403
+    provider_id: openai-r403
+    provider_model_id: m
+    model_type: llm
+  - model_id: good
+    provider_id: openai-ok
+    provider_model_id: m
+    model_type: llm
+  - model_id: mid
+    provider_id: openai-rmid
+    provider_model_id: m
+    model_type: llm
+  - model_id: emb
+    provider_id: openai-ok
+    provider_model_id: e
+    model_type: embedding
+    metadata:
+      embedding_dimension: 8
+  shields: []
+  vector_stores: []
+  datasets: []
+  scoring_fns: []
+  benchmarks: []
+server:
+  port: 8321
