@@ -120,10 +120,10 @@ RUN chmod +x /usr/local/bin/ogx-entrypoint.sh
 
 RUN mkdir -p "/.${CLI_NAME}" /.cache && chmod -R g+rw /app "/.${CLI_NAME}" /.cache
 
-LABEL ai.cupola.component="ogx-distribution-starter" \
-      ai.cupola.source="github.com/rkazak07/ogx branch cupola/1.1.3" \
-      ai.cupola.commit="${OGX_COMMIT}" \
-      ai.cupola.ogx-version="${OGX_VERSION}" \
+LABEL org.opencontainers.image.source="https://github.com/rkazak07/ogx" \
+      org.opencontainers.image.revision="${OGX_COMMIT}" \
+      org.opencontainers.image.version="${OGX_VERSION}" \
+      ai.cupola.component="ogx-distribution-starter" \
       ai.cupola.python-packages="containers/cupola/image-lock.txt (the only source)"
 
 ENTRYPOINT ["/usr/local/bin/ogx-entrypoint.sh"]
