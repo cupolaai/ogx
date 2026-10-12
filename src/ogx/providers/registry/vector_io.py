@@ -612,7 +612,7 @@ Please refer to the inline provider documentation.
             api=Api.vector_io,
             adapter_type="milvus",
             provider_type="remote::milvus",
-            pip_packages=["pymilvus>=2.6.2"] + DEFAULT_VECTOR_IO_DEPS,
+            pip_packages=["pymilvus>=2.6.2,<3.0"] + DEFAULT_VECTOR_IO_DEPS,  # Cupola: 2.x line
             module="ogx.providers.remote.vector_io.milvus",
             config_class="ogx.providers.remote.vector_io.milvus.MilvusVectorIOConfig",
             api_dependencies=[Api.inference],
@@ -818,7 +818,7 @@ For more details on TLS configuration, refer to the [TLS setup guide](https://mi
         InlineProviderSpec(
             api=Api.vector_io,
             provider_type="inline::milvus",
-            pip_packages=["pymilvus[milvus-lite]>=2.4.10"] + DEFAULT_VECTOR_IO_DEPS,
+            pip_packages=["pymilvus[milvus-lite,bulk_writer]>=2.4.10,<3.0"] + DEFAULT_VECTOR_IO_DEPS,  # Cupola: 2.x line + bulk_writer
             module="ogx.providers.inline.vector_io.milvus",
             config_class="ogx.providers.inline.vector_io.milvus.MilvusVectorIOConfig",
             api_dependencies=[Api.inference],

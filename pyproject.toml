@@ -106,7 +106,7 @@ starter = [
     "pandas",
     "pillow",
     "pgvector>=0.3.0",
-    "pymilvus[milvus-lite]>=2.4.10",
+    "pymilvus[milvus-lite,bulk_writer]>=2.4.10,<3.0",  # Cupola: pymilvus/milvus-lite 3.x write VARCHAR content as a tuple (search breaks); bulk_writer is imported by the milvus-lite server at boot
     "pymongo",
     "pypdf>=6.10.2",
     "pythainlp",
@@ -224,8 +224,8 @@ test = [
     "langchain-core",
     "langchain-openai>=1.2.2",
     "langgraph",
-    "milvus-lite>=2.5.0; platform_machine == 'x86_64' or platform_machine == 'aarch64' or platform_machine == 'arm64'",
-    "pymilvus>=2.6.2",
+    "milvus-lite>=2.5.0,<3.0; platform_machine == 'x86_64' or platform_machine == 'aarch64' or platform_machine == 'arm64'",  # Cupola: 2.x line
+    "pymilvus>=2.6.2,<3.0",  # Cupola: 2.x line
     "qdrant-client",
     "requests",
     "torch>=2.6.0",
