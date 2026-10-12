@@ -818,7 +818,8 @@ For more details on TLS configuration, refer to the [TLS setup guide](https://mi
         InlineProviderSpec(
             api=Api.vector_io,
             provider_type="inline::milvus",
-            pip_packages=["pymilvus[milvus-lite,bulk_writer]>=2.4.10,<3.0"] + DEFAULT_VECTOR_IO_DEPS,  # Cupola: 2.x line + bulk_writer
+            # Cupola: 2.x line + bulk_writer
+            pip_packages=["pymilvus[milvus-lite,bulk_writer]>=2.4.10,<3.0"] + DEFAULT_VECTOR_IO_DEPS,
             module="ogx.providers.inline.vector_io.milvus",
             config_class="ogx.providers.inline.vector_io.milvus.MilvusVectorIOConfig",
             api_dependencies=[Api.inference],
