@@ -1,0 +1,129 @@
+# syntax=docker/dockerfile:1.7
+#
+# Cupola's OGX distribution image (cupola-cr.io/cupola/cupola-distribution-starter),
+# built from this fork's source. Build it with containers/cupola/build.sh only.
+#
+# THE ONLY SOURCE of the image's third-party Python packages is
+# containers/cupola/image-lock.txt: every package pinned to one exact wheel file
+# by its sha256, installed with --no-index --no-deps --require-hashes from a
+# wheelhouse build.sh downloads beforehand. Nothing is resolved here; no
+# package index is reached during the build. ogx and ogx-api are the wheels
+# build.sh builds from this commit. uv.lock is NOT used to install anything;
+# it only serves development and tests, and its milvus family is checked
+# against the installed packages below.
+#
+# Everything else follows upstream's containers/Containerfile at v1.1.3 (the
+# recipe of docker.io/ogxai/distribution-starter:1.1.3), so the image matches
+# it outside the Cupola changes:
+#   - base: python:3.12.13-slim-trixie of 2026-06-24, by digest (the same four
+#     layers as the official image; docker-library/repo-info 82a0a1993672);
+#   - system packages: upstream's apt list, from the Debian snapshot of the
+#     official build (2026-06-24, APT_SNAPSHOT);
+#   - the same environment, entrypoint and directories.
+
+ARG BASE_IMAGE=docker.io/library/python@sha256:86d3e4424d5e963e60594a3a6b4d597cc4d41f5152fe67a97a40dca9ea092475
+FROM ${BASE_IMAGE}
+
+ARG APT_SNAPSHOT=20260624T151000Z
+ARG OGX_VERSION
+ARG OGX_COMMIT
+
+ENV UV_HTTP_TIMEOUT=500
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+WORKDIR /app
+
+# A snapshot's Release files are past their Valid-Until by design; their
+# signatures are still checked.
+RUN set -eux; \
+    apt-get -o Acquire::Check-Valid-Until=false update --snapshot "$APT_SNAPSHOT"; \
+    apt-get install -y --no-install-recommends --snapshot "$APT_SNAPSHOT" \
+        iputils-ping net-tools iproute2 dnsutils telnet \
+        curl wget git procps psmisc lsof traceroute bubblewrap \
+        gcc g++; \
+    rm -rf /var/lib/apt/lists/*
+
+# Upstream's environment, unchanged (the entrypoint reads DISTRO_NAME,
+# CLI_NAME and RUN_CONFIG_PATH; the rest describes upstream's recipe).
+ENV UV_SYSTEM_PYTHON=1
+ENV INSTALL_MODE=pypi
+ENV OGX_DIR=/workspace
+ENV OGX_CLIENT_DIR=
+ENV PYPI_VERSION=1.1.3
+ENV TEST_PYPI_VERSION=
+ENV KEEP_WORKSPACE=
+ENV DISTRO_NAME=starter
+ENV PACKAGE_NAME=ogx
+ENV CLI_NAME=ogx
+ENV RUN_CONFIG_PATH=
+
+# Third-party packages: exactly image-lock.txt, from the wheelhouse.
+RUN --mount=type=bind,source=wheelhouse,target=/tmp/wheelhouse \
+    --mount=type=bind,source=image-lock.txt,target=/tmp/image-lock.txt \
+    --network=none \
+    pip install --no-cache-dir --no-compile --no-index --no-deps --require-hashes \
+        --find-links /tmp/wheelhouse -r /tmp/image-lock.txt
+
+# ogx and ogx-api, built by build.sh from this commit (hashes in ogx-wheels.txt).
+RUN --mount=type=bind,source=ogx-wheels,target=/tmp/ogx-wheels \
+    --network=none \
+    pip install --no-cache-dir --no-compile --no-index --no-deps --require-hashes \
+        --find-links /tmp/ogx-wheels -r /tmp/ogx-wheels/ogx-wheels.txt
+
+# Bytecode for every installed module, written once here: at run time
+# PYTHONDONTWRITEBYTECODE=1 keeps Python from writing it, so without this every
+# pod start would compile the modules again in memory. The one file left out,
+# olefile/olefile2.py, is olefile's Python 2-only module (a SyntaxError on
+# Python 3, never importable here); any other failure stops the build.
+RUN python3 -m compileall -q -j 0 -x 'olefile/olefile2\.py$' /usr/local/lib/python3.12/site-packages
+
+# tiktoken's cl100k_base, fetched and checked by build.sh (the server never
+# downloads it; needed without internet).
+ENV TIKTOKEN_CACHE_DIR="/.cache/tiktoken"
+COPY tiktoken/ /.cache/tiktoken/
+
+# Build-time checks: the image is consistent, its milvus family agrees with
+# uv.lock, and tiktoken works offline. A failure stops the build.
+RUN --mount=type=bind,source=checks,target=/tmp/checks \
+    --mount=type=bind,source=uv.lock,target=/tmp/uv.lock \
+    --network=none \
+    set -eux; \
+    pip check; \
+    python3 /tmp/checks/image_checks.py --uv-lock /tmp/uv.lock --version "$OGX_VERSION"
+
+RUN cat <<'EOF' >/usr/local/bin/ogx-entrypoint.sh
+#!/bin/sh
+set -e
+
+# Enable OpenTelemetry auto-instrumentation if any OTEL_* variable is set
+CMD_PREFIX=""
+if env | grep -q '^OTEL_'; then
+  CMD_PREFIX="opentelemetry-instrument"
+  # Disable low-level DB driver instrumentation to prevent duplicate spans
+  # when SQLAlchemy ORM instrumentation is also active (known OTel issue).
+  export OTEL_PYTHON_DISABLED_INSTRUMENTATIONS="${OTEL_PYTHON_DISABLED_INSTRUMENTATIONS:+$OTEL_PYTHON_DISABLED_INSTRUMENTATIONS,}asyncpg,sqlite3"
+fi
+
+CLI_NAME="${CLI_NAME:-ogx}"
+
+if [ -n "$RUN_CONFIG_PATH" ] && [ -f "$RUN_CONFIG_PATH" ]; then
+  exec $CMD_PREFIX "$CLI_NAME" stack run "$RUN_CONFIG_PATH" "$@"
+fi
+
+if [ -n "$DISTRO_NAME" ]; then
+  exec $CMD_PREFIX "$CLI_NAME" stack run "$DISTRO_NAME" "$@"
+fi
+
+exec $CMD_PREFIX "$CLI_NAME" stack run "$@"
+EOF
+RUN chmod +x /usr/local/bin/ogx-entrypoint.sh
+
+RUN mkdir -p "/.${CLI_NAME}" /.cache && chmod -R g+rw /app "/.${CLI_NAME}" /.cache
+
+LABEL ai.cupola.component="ogx-distribution-starter" \
+      ai.cupola.source="github.com/rkazak07/ogx branch cupola/1.1.3" \
+      ai.cupola.commit="${OGX_COMMIT}" \
+      ai.cupola.ogx-version="${OGX_VERSION}" \
+      ai.cupola.python-packages="containers/cupola/image-lock.txt (the only source)"
+
+ENTRYPOINT ["/usr/local/bin/ogx-entrypoint.sh"]
