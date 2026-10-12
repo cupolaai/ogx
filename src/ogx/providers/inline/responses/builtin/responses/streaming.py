@@ -105,6 +105,7 @@ from ogx_api import (
     ToolDef,
     WebSearchToolTypes,
 )
+from ogx_api.common.provider_errors import PROVIDER_ERROR_FIELDS, provider_error_fields
 from ogx_api.inference import ServiceTier
 
 from .types import (
@@ -730,9 +731,18 @@ class StreamingResponseOrchestrator:
             self.final_messages = messages.copy()
             self.sequence_number += 1
 
-            if isinstance(exc, APIStatusError) or (hasattr(exc, "status_code") and hasattr(exc, "body")):
+            # Cupola: a provider error keeps what the provider said, also when
+            # it arrives inside the stream (an APIError without a status).
+            provider_error = provider_error_fields(exc)
+            if (
+                provider_error is not None
+                or isinstance(exc, APIStatusError)
+                or (hasattr(exc, "status_code") and hasattr(exc, "body"))
+            ):
                 logger.warning("Provider SDK error during response generation", exc=exc)
                 error_code, error_message = extract_openai_error(exc)
+                if provider_error is not None and provider_error["code"] == "rate_limit_exceeded":
+                    error_code = "rate_limit_exceeded"
             else:
                 logger.exception(
                     "Unexpected error during response generation", error_type=type(exc).__name__, exc_info=exc
@@ -741,7 +751,11 @@ class StreamingResponseOrchestrator:
                     "server_error",
                     "An unexpected error occurred while generating the response.",
                 )
-            error = OpenAIResponseError(code=error_code, message=error_message)
+            error = OpenAIResponseError(
+                code=error_code,
+                message=error_message,
+                **({k: provider_error[k] for k in PROVIDER_ERROR_FIELDS} if provider_error is not None else {}),
+            )
             failure_response = self._snapshot_response("failed", output_messages, error=error)
             yield OpenAIResponseObjectStreamResponseFailed(
                 response=failure_response,

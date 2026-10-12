@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ogx_api.common.errors import OpenAIErrorResponse
+from ogx_api.common.provider_errors import provider_error_response
 from ogx_api.common.responses import Order
 from ogx_api.router_utils import create_path_dependency, create_query_dependency, standard_responses
 from ogx_api.version import OGX_API_V1, OGX_API_V1ALPHA
@@ -68,6 +69,11 @@ async def _sse_generator(event_gen: AsyncIterator[Any], context: str = "inferenc
         raise
     except Exception as e:
         logger.exception(f"Error in SSE generator ({context})")
+        # Cupola: a provider error inside the stream keeps its structured fields.
+        provider_error = provider_error_response(e)
+        if provider_error is not None:
+            yield _create_sse_event(provider_error[1])
+            return
         exc = _http_exception_from_sse_error(e)
         yield _create_sse_event(OpenAIErrorResponse.from_message(exc.detail, code=str(exc.status_code)).to_dict())
 

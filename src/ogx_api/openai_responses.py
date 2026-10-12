@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from enum import Enum, StrEnum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_serializer, model_validator
 from typing_extensions import TypedDict
 
 from ogx_api.inference import OpenAITokenLogProb
@@ -28,10 +28,26 @@ class OpenAIResponseError(BaseModel):
 
     :param code: Error code identifying the type of failure
     :param message: Human-readable error message describing the failure
+    :param provider_status: (Optional) The model provider's HTTP status, when the failure was a provider error
+    :param provider: (Optional) The upstream provider an aggregator named, when the failure was a provider error
+    :param provider_detail: (Optional) The provider's own words, when the failure was a provider error
     """
 
     code: str
     message: str
+    # Cupola: what the model provider said (ogx_api.common.provider_errors);
+    # omitted from the JSON when unset.
+    provider_status: int | None = None
+    provider: str | None = None
+    provider_detail: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_provider_fields(self, handler: Any) -> dict[str, Any]:
+        data = handler(self)
+        for key in ("provider_status", "provider", "provider_detail"):
+            if data.get(key) is None:
+                data.pop(key, None)
+        return data
 
 
 @json_schema_type

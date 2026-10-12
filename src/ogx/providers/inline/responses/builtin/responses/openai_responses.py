@@ -77,6 +77,7 @@ from ogx_api import (
     ToolRuntime,
     VectorIO,
 )
+from ogx_api.common.provider_errors import ProviderRequestError
 from ogx_api.inference import OpenAIChatCompletionRequestWithExtraBody, ServiceTier
 
 from .streaming import StreamingResponseOrchestrator
@@ -809,6 +810,10 @@ class OpenAIResponsesImpl:
                         )
                         # Surface the provider message — it may be actionable (e.g. wrong tool-call-parser,
                         # context window exceeded). Use the error code to pick the right HTTP status.
+                        # Cupola: a provider error keeps the provider's HTTP status
+                        # and its structured fields.
+                        if failed_response.error and failed_response.error.provider_status:
+                            raise ProviderRequestError(failed_response.error.model_dump())
                         if error_code == "invalid_prompt":
                             raise InvalidParameterError("model", model, error_message)
                         raise InternalServerError(error_message)

@@ -23,6 +23,10 @@ class OpenAIErrorDetail(BaseModel):
     type: str | None = None
     code: str | None = None
     param: str | None = None
+    # Cupola: a provider error's structured fields (ogx_api.common.provider_errors).
+    provider_status: int | None = None
+    provider: str | None = None
+    provider_detail: str | None = None
 
 
 class OpenAIErrorResponse(BaseModel):

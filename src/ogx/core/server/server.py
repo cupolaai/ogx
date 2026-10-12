@@ -51,6 +51,7 @@ from ogx.core.utils.config_resolution import resolve_config_or_distro
 from ogx.log import LoggingConfig, get_logger, parse_yaml_config, setup_logging
 from ogx_api import Api, ConflictError, ResourceNotFoundError
 from ogx_api.common.errors import OpenAIErrorResponse
+from ogx_api.common.provider_errors import provider_error_response
 
 from .auth import AuthenticationMiddleware, RouteAuthorizationMiddleware
 from .metrics import RequestMetricsMiddleware, build_route_to_api_map
@@ -117,6 +118,11 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
     # assert they surface as BadRequestError instead.
     if isinstance(exc, ResourceNotFoundError) and request.url.path.startswith("/v1/vector_stores"):
         http_exc = HTTPException(status_code=httpx.codes.BAD_REQUEST, detail=str(exc))
+
+    # Cupola: a provider error answers with its status and structured fields.
+    provider_error = provider_error_response(exc)
+    if provider_error is not None:
+        return JSONResponse(status_code=provider_error[0], content=provider_error[1])
 
     return JSONResponse(
         status_code=http_exc.status_code, content=OpenAIErrorResponse.from_message(http_exc.detail).to_dict()
