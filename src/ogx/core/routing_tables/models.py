@@ -90,6 +90,18 @@ class ModelsRoutingTable(CommonRoutingTableImpl, Models):
     async def refresh(self) -> None:
         for provider_id, provider in self.impls_by_provider_id.items():
             refresh = await provider.should_refresh_models()
+            # CUPOLA PATCH — a provider pinned to its models (refresh_models:
+            # false + allowed_models) is not listed at startup either: its
+            # run.yaml models are already registered, and an unreachable
+            # provider must not hold up startup or the other models.
+            if (
+                not refresh
+                and provider_id not in self.listed_providers
+                and getattr(getattr(provider, "config", None), "allowed_models", None)
+            ):
+                self.listed_providers.add(provider_id)
+                logger.info("Cupola: startup model listing skipped (pinned provider)", provider_id=provider_id)
+                continue
             refresh = refresh or provider_id not in self.listed_providers
             if not refresh:
                 continue
