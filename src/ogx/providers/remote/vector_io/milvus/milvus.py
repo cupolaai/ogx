@@ -565,10 +565,26 @@ class MilvusVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorStoresProtoc
 
         key = f"{VECTOR_DBS_PREFIX}{vector_store_id}"
         vector_store_data = await self.kvstore.get(key)
-        if not vector_store_data:
-            raise VectorStoreNotFoundError(vector_store_id)
-
-        vector_store = VectorStore.model_validate_json(vector_store_data)
+        if vector_store_data:
+            vector_store = VectorStore.model_validate_json(vector_store_data)
+        else:
+            # CUPOLA PATCH — restart rehydration (docs/archive/image-mirror-forks/UPSTREAM-SYNC-OGX.md §4b).
+            # register_vector_store() never persists this key (upstream flaw),
+            # so after a pod restart the cache is cold and the kvstore lookup
+            # always misses. Rebuild the VectorStore from the mixin's persisted
+            # OpenAI metadata instead (lazy: uses the live Milvus client).
+            store_info = (getattr(self, "openai_vector_stores", None) or {}).get(vector_store_id)
+            meta = (store_info or {}).get("metadata") or {}
+            if not (meta.get("embedding_model") and meta.get("embedding_dimension")):
+                raise VectorStoreNotFoundError(vector_store_id)
+            vector_store = VectorStore(
+                identifier=vector_store_id,
+                provider_id=meta.get("provider_id") or "milvus",
+                provider_resource_id=meta.get("provider_vector_store_id") or vector_store_id,
+                embedding_model=meta["embedding_model"],
+                embedding_dimension=int(meta["embedding_dimension"]),
+                vector_store_name=(store_info or {}).get("name"),
+            )
         use_native_hybrid = isinstance(self.config, RemoteMilvusVectorIOConfig)
         index = VectorStoreWithIndex(
             vector_store=vector_store,
