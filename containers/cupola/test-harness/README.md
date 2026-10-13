@@ -20,6 +20,12 @@ sh rag_restart.sh "$IMG" 18331
 
 # seconds from container start to /v1/health, three runs
 sh startup_time.sh "$IMG" 18334 3
+
+# inference_store purge at startup (CUPOLA_INFERENCE_STORE=off): 1,323 rows of ~19 KB, then 50,000 rows of
+# 4 KB (the 10 s limit stops it, the next starts finish it); last argument "on" = store env unset (timing)
+sh inference_store_purge.sh "$IMG" 18341 1323
+sh inference_store_purge.sh "$IMG" 18342 50000 4000
+BACKEND=postgres sh inference_store_purge.sh "$IMG" 18343 1323     # same on a postgres:17 container
 ```
 
 The fake provider answers by path prefix: `r429` OpenRouter's live 429 body (2026-10-12, free shared pool), `r401`
@@ -30,5 +36,9 @@ and 8-dimension embeddings (`openai-ok/emb`).
 Expected on `1.1.3-cupola.9`: every provider error keeps the provider's HTTP status (Responses without a stream too)
 and carries `provider_status`, `provider` (when the provider names one) and `provider_detail`; a 429 has code
 `rate_limit_exceeded`; `openai-ok/good` answers normally; the RAG search finds the document before and after the
-restart. The openai SDK retries a 429 twice with backoff, so a full `measure.sh` run takes a few minutes under
+restart. From `1.1.3-cupola.10`, with `CUPOLA_INFERENCE_STORE=off` the first start logs `Cupola: inference_store off,
+deleted N stored chat completions` (or `…, more remain (time limit 10 s), continues at the next start`), the next one
+`deleted 0`; each line ends with the backend's scrub (`sqlite: secure_delete on, WAL truncated` or `postgres: table
+rewritten by VACUUM FULL; …`). The marker is then found 0 times in the SQLite database file and WAL, or in PostgreSQL's
+`base/` (its `pg_wal` is the server's and keeps older copies). The openai SDK retries a 429 twice with backoff, so a full `measure.sh` run takes a few minutes under
 emulation.

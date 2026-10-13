@@ -64,6 +64,10 @@ from ogx_api.inference.models import RerankRequest
 
 logger = get_logger(name=__name__, category="core::routers")
 
+# Cupola: at most this long at startup for deleting the chat completions stored before
+# inference_store was switched off; the rest goes at the next start.
+CUPOLA_DELETE_STORED_SECONDS = 10.0
+
 
 def _log_background_task_error(task: asyncio.Task) -> None:
     if not task.cancelled() and (exc := task.exception()):
@@ -87,11 +91,40 @@ class InferenceRouter(Inference):
         if _cupola_os.environ.get("CUPOLA_INFERENCE_STORE", "").strip().lower() == "off":
             logger.info("Cupola: inference_store disabled (CUPOLA_INFERENCE_STORE=off)")
             self.store = None
+            self._cupola_stored = store
         else:
             self.store = store
+            self._cupola_stored = None
 
     async def initialize(self) -> None:
         logger.debug("InferenceRouter.initialize")
+        if self._cupola_stored is not None:
+            stored, self._cupola_stored = self._cupola_stored, None
+            await self._cupola_delete_stored_completions(stored)
+
+    async def _cupola_delete_stored_completions(self, store: InferenceStore) -> None:
+        # CUPOLA PATCH — with inference_store off, the chat completions stored before it
+        # was switched off are deleted at startup, then the backend is scrubbed so the
+        # deleted content does not stay on disk. A failure never stops OGX from starting.
+        deadline = time.monotonic() + CUPOLA_DELETE_STORED_SECONDS
+        try:
+            deleted, more = await store.cupola_delete_stored_completions(deadline)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Cupola: could not delete the stored chat completions, OGX starts anyway and tries again at the next start",
+                error_type=type(e).__name__,
+                error=str(e)[:200],
+            )
+            return
+        scrub, guaranteed = await store.cupola_scrub(deadline)
+        message = f"Cupola: inference_store off, deleted {deleted} stored chat completions"
+        if more:
+            message += f", more remain (time limit {CUPOLA_DELETE_STORED_SECONDS:g} s), continues at the next start"
+        message += f" ({scrub})"
+        if more or not guaranteed:
+            logger.warning(message)
+        else:
+            logger.info(message)
 
     async def shutdown(self) -> None:
         logger.debug("InferenceRouter.shutdown")

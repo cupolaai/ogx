@@ -122,6 +122,26 @@ class SqlAlchemySqlStoreImpl(SqlStore):
             await self._engine.dispose()
             self._engine = None
 
+    async def cupola_execute_autocommit(self, statements: Sequence[str]) -> list[Any]:
+        """Cupola: run maintenance statements (PRAGMA, VACUUM) on one autocommit connection.
+
+        Returns each statement's first row (None when it returns no rows). The connection
+        is closed afterwards instead of going back to the pool, so session settings made
+        here (e.g. a statement_timeout) never reach another query.
+        """
+        await self._ensure_engine()
+        assert self._engine is not None  # _ensure_engine guarantees this
+        rows: list[Any] = []
+        async with self._engine.connect() as conn:
+            try:
+                await conn.execution_options(isolation_level="AUTOCOMMIT")
+                for sql in statements:
+                    result = await conn.execute(text(sql))
+                    rows.append(result.first() if result.returns_rows else None)
+            finally:
+                await conn.invalidate()
+        return rows
+
     def create_engine(self) -> AsyncEngine:
         # Configure connection args for better concurrency support
         connect_args = {}

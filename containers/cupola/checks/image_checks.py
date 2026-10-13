@@ -8,11 +8,15 @@
    extras add) is installed at exactly the versions uv.lock resolves: the image installs from image-lock.txt only, uv.lock serves
    development and tests, and the two must not drift apart here.
 4. The server imports; tiktoken's cl100k_base loads without network.
+5. Python's SQLite is built with SECURE_DELETE and it is on: W9 relies on it so a
+   deleted inference_store row is overwritten in the database file. A new base
+   image without it must stop the build, not lose the guarantee unnoticed.
 Any failure exits non-zero and stops the image build.
 """
 
 import argparse
 import re
+import sqlite3
 import subprocess
 import sys
 import tomllib
@@ -49,6 +53,20 @@ def closure(root, extras):
             if req.marker is None or any(req.marker.evaluate({"extra": e}) for e in (ex or {""})):
                 todo.append((req.name, set(req.extras)))
     return seen
+
+
+def sqlite_errors():
+    """Python's SQLite must be built with SECURE_DELETE, and it must be on."""
+    con = sqlite3.connect(":memory:")
+    try:
+        errors = []
+        if "SECURE_DELETE" not in [row[0] for row in con.execute("PRAGMA compile_options")]:
+            errors.append(f"SQLite {sqlite3.sqlite_version} is not built with SECURE_DELETE")
+        if con.execute("PRAGMA secure_delete").fetchone()[0] != 1:
+            errors.append(f"SQLite {sqlite3.sqlite_version}: PRAGMA secure_delete is not on by default")
+        return errors
+    finally:
+        con.close()
 
 
 def main():
@@ -103,12 +121,15 @@ def main():
     if len(tiktoken.get_encoding("cl100k_base").encode("Cupola")) == 0:
         errors.append("tiktoken cl100k_base did not encode")
 
+    errors += sqlite_errors()
+
     if errors:
         print("cupola image checks FAILED:\n  " + "\n  ".join(errors), file=sys.stderr)
         return 1
     print(
         f"cupola image checks OK: ogx {args.version}; {checked} starter requirements satisfied; "
-        f"milvus family ({len(family)} packages) equals uv.lock; tiktoken offline"
+        f"milvus family ({len(family)} packages) equals uv.lock; tiktoken offline; "
+        f"SQLite {sqlite3.sqlite_version} SECURE_DELETE on"
     )
     return 0
 

@@ -4,6 +4,7 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 import asyncio
+import time
 from typing import Any, NamedTuple
 
 from sqlalchemy.exc import IntegrityError
@@ -30,7 +31,7 @@ from ogx_api import (
     OpenAIMessageParam,
     Order,
 )
-from ogx_api.internal.sqlstore import ColumnDefinition, ColumnType
+from ogx_api.internal.sqlstore import ColumnDefinition, ColumnType, DeleteOperation
 
 logger = get_logger(name=__name__, category="inference")
 
@@ -153,6 +154,92 @@ class InferenceStore:
         """Wait for all queued writes to complete. Useful for testing."""
         if self.enable_write_queue and self._queue is not None:
             await self._queue.join()
+
+    async def cupola_delete_stored_completions(self, deadline: float, page_size: int = 500) -> tuple[int, bool]:
+        """Cupola: delete every stored chat completion; returns (deleted, more_remain).
+
+        Startup maintenance for CUPOLA_INFERENCE_STORE=off, so it runs on the base store
+        without the access policy: there is no user at startup and every row must go,
+        whoever wrote it. Rows are deleted page by page by id, which keeps the count
+        exact, and no new page is started once time.monotonic() reaches `deadline`.
+        """
+        if self.sql_store is None:
+            raise ValueError("Inference store is not initialized")
+        base = self.sql_store.sql_store
+        table = self.reference.table_name
+        deleted = 0
+        while True:
+            page = await base.fetch_all(table=table, limit=page_size)
+            ids = [row["id"] for row in page.data]
+            if not ids:
+                return deleted, False
+            if time.monotonic() >= deadline:
+                return deleted, True
+            await base.delete_many([DeleteOperation(table=table, where={"id": row_id}) for row_id in ids])
+            deleted += len(ids)
+
+    async def cupola_scrub(self, deadline: float) -> tuple[str, bool]:
+        """Cupola: keep deleted chat completions from staying on disk; returns (what happened, guaranteed).
+
+        Runs at every start with the store off, after cupola_delete_stored_completions,
+        and never raises: the outcome is reported for the startup log.
+        - sqlite: the deletion overwrites the freed pages when the SQLite build has
+          SECURE_DELETE (read back with PRAGMA secure_delete); the WAL is then
+          checkpointed and truncated to zero bytes.
+        - postgres: DELETE leaves the rows in the table files until vacuumed, so the
+          table is rewritten with VACUUM FULL within what is left of the startup
+          budget (statement_timeout) and without waiting for another session's lock
+          (lock_timeout 2 s). The server's WAL, replicas and backups are not OGX's.
+        - any other backend: no guarantee.
+        """
+        backend = _SQLSTORE_BACKENDS.get(self.reference.backend)
+        kind = backend.type if backend else None
+        base = self.sql_store.sql_store if self.sql_store else None
+        execute = getattr(base, "cupola_execute_autocommit", None)
+        if kind == StorageBackendType.SQL_SQLITE and execute:
+            try:
+                secure, checkpoint = await execute(["PRAGMA secure_delete", "PRAGMA wal_checkpoint(TRUNCATE)"])
+            except Exception as e:  # noqa: BLE001
+                return (
+                    f"sqlite: the WAL could not be truncated ({type(e).__name__}), "
+                    "deleted content may remain in it until the next start",
+                    False,
+                )
+            notes = []
+            if not secure or secure[0] != 1:
+                notes.append(
+                    "sqlite: secure_delete is off in this SQLite build, "
+                    "deleted content may remain in the database file until overwritten"
+                )
+            if not checkpoint or checkpoint[0] != 0:
+                notes.append("sqlite: the WAL is busy and was not truncated, deleted content may remain in it")
+            if notes:
+                return "; ".join(notes), False
+            return "sqlite: secure_delete on, WAL truncated", True
+        if kind == StorageBackendType.SQL_POSTGRES and execute:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return (
+                    "postgres: no time left for VACUUM FULL in this start, "
+                    "deleted content stays in the table files until the next start",
+                    False,
+                )
+            left_ms = max(1, int(min(left, 3600.0) * 1000))
+            table = '"' + self.reference.table_name.replace('"', '""') + '"'
+            try:
+                await execute(["SET lock_timeout = 2000", f"SET statement_timeout = {left_ms}", f"VACUUM FULL {table}"])
+            except Exception as e:  # noqa: BLE001
+                return (
+                    f"postgres: VACUUM FULL did not finish ({type(e).__name__}), "
+                    "deleted content stays in the table files until the next start",
+                    False,
+                )
+            return (
+                "postgres: table rewritten by VACUUM FULL; the database server's WAL, "
+                "replicas and backups keep older copies under its own retention",
+                True,
+            )
+        return f"no residue guarantee for storage backend '{kind}': deleted content may remain on its disk", False
 
     async def _ensure_workers_started(self) -> None:
         """Ensure the async write queue workers run on the current loop."""
