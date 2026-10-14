@@ -74,6 +74,9 @@ class TestOpenAIBaseURLConfig:
             api_key="test-key",
             base_url=custom_url,
             http_client=ANY,
+            # Cupola: the external providers' call limits (cupola_limits.py).
+            max_retries=1,
+            timeout=ANY,
         )
 
     @patch("ogx.providers.utils.inference.openai_mixin.AsyncOpenAI")
@@ -111,6 +114,9 @@ class TestOpenAIBaseURLConfig:
             api_key="test-key",
             base_url=custom_url,
             http_client=ANY,
+            # Cupola: the external providers' call limits (cupola_limits.py).
+            max_retries=1,
+            timeout=ANY,
         )
 
         # Verify the models.list method was called
@@ -154,4 +160,7 @@ class TestOpenAIBaseURLConfig:
             api_key="test-key",
             base_url="https://proxy.openai.com/v1",
             http_client=ANY,
+            # Cupola: the external providers' call limits (cupola_limits.py).
+            max_retries=1,
+            timeout=ANY,
         )

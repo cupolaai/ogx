@@ -105,7 +105,7 @@ from ogx_api import (
     ToolDef,
     WebSearchToolTypes,
 )
-from ogx_api.common.provider_errors import PROVIDER_ERROR_FIELDS, provider_error_fields
+from ogx_api.common.provider_errors import CONNECTION_CODES, PROVIDER_ERROR_FIELDS, provider_error_fields
 from ogx_api.inference import ServiceTier
 
 from .types import (
@@ -743,6 +743,9 @@ class StreamingResponseOrchestrator:
                 error_code, error_message = extract_openai_error(exc)
                 if provider_error is not None and provider_error["code"] == "rate_limit_exceeded":
                     error_code = "rate_limit_exceeded"
+                # Cupola: an unreachable or silent provider keeps its own code and words.
+                if provider_error is not None and provider_error["code"] in CONNECTION_CODES:
+                    error_code, error_message = provider_error["code"], provider_error["message"]
             else:
                 logger.exception(
                     "Unexpected error during response generation", error_type=type(exc).__name__, exc_info=exc

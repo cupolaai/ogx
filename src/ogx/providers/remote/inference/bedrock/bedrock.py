@@ -90,6 +90,9 @@ class BedrockInferenceAdapter(OpenAIMixin):
     for dynamic model discovery. Models must be pre-registered in the config.
     """
 
+    # Cupola: an external provider — Cupola's call limits apply (cupola_limits.py).
+    cupola_call_limits: bool = True
+
     provider_data_api_key_field: str | None = "aws_bedrock_bearer_token"
 
     # built once in initialize() so get_extra_client_params() can stay sync;

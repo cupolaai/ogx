@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from ogx.core.request_headers import NeedsRequestProviderData
 from ogx.log import get_logger
+from ogx.providers.utils.inference import cupola_limits
 from ogx.providers.utils.inference.http_client import (
     _merge_network_config_into_client,
     build_network_client_kwargs,
@@ -97,6 +98,12 @@ class OpenAIMixin(NeedsRequestProviderData, ABC, BaseModel):
     # Set to True to strip usage from all intermediate chunks and emit a single compliant
     # final usage chunk, preventing callers from overcounting tokens.
     coalesce_streaming_usage: bool = False
+
+    # Cupola: the external providers (OpenAI-compatible, Anthropic, AWS Bedrock)
+    # set this to apply Cupola's call limits (cupola_limits.py: one retry,
+    # connect 5 s, first response 180 s, 60 s between chunks, 110 s without a
+    # stream). In-cluster model servers keep the SDK's defaults.
+    cupola_call_limits: bool = False
 
     # Allow subclasses to control whether the provider supports tokenized embeddings input
     # Set to True for providers that support pre-tokenized input (list[int] and list[list[int]])
@@ -263,6 +270,8 @@ class OpenAIMixin(NeedsRequestProviderData, ABC, BaseModel):
         else:
             extra_params["http_client"] = DefaultAsyncHttpxClient(verify=self.shared_ssl_context)
 
+        if self.cupola_call_limits:
+            extra_params.update(cupola_limits.client_params())
         client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -393,7 +402,12 @@ class OpenAIMixin(NeedsRequestProviderData, ABC, BaseModel):
             completion_kwargs["extra_body"] = extra_body
         if extra_headers := self._get_extra_request_headers():
             completion_kwargs["extra_headers"] = extra_headers
-        resp = await self.client.completions.create(**completion_kwargs)
+        if self.cupola_call_limits:
+            resp = await cupola_limits.call_with_limits(
+                lambda: self.client.completions.create(**completion_kwargs), bool(params.stream)
+            )
+        else:
+            resp = await self.client.completions.create(**completion_kwargs)
 
         return await self._postprocess_chunk(resp, params.stream)  # type: ignore[no-any-return]
 
@@ -465,7 +479,12 @@ class OpenAIMixin(NeedsRequestProviderData, ABC, BaseModel):
             request_params["extra_body"] = extra_body
         if extra_headers := self._get_extra_request_headers():
             request_params["extra_headers"] = extra_headers
-        resp = await self.client.chat.completions.create(**request_params)
+        if self.cupola_call_limits:
+            resp = await cupola_limits.call_with_limits(
+                lambda: self.client.chat.completions.create(**request_params), bool(params.stream)
+            )
+        else:
+            resp = await self.client.chat.completions.create(**request_params)
 
         return await self._postprocess_chunk(resp, params.stream)  # type: ignore[no-any-return]
 

@@ -14,7 +14,7 @@ import json
 
 import httpx
 import pytest
-from openai import APIConnectionError, APIError, AuthenticationError, RateLimitError
+from openai import APIError, AuthenticationError, RateLimitError
 from starlette.requests import Request
 
 from ogx.core.server.server import global_exception_handler
@@ -73,7 +73,9 @@ class NotFromTheProviderSDKError(Exception):
 
 @pytest.mark.parametrize(
     "exc",
-    [APIConnectionError(request=REQ), ValueError("x"), NotFromTheProviderSDKError(), APIError("x", REQ, body=None)],
+    # A connection error is a provider error since 2026-10-14 (provider_unreachable):
+    # test_cupola_provider_unreachable.py.
+    [ValueError("x"), NotFromTheProviderSDKError(), APIError("x", REQ, body=None)],
 )
 def test_other_errors_are_not_provider_errors(exc):
     assert provider_error_fields(exc) is None

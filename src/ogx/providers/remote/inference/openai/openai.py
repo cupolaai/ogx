@@ -51,6 +51,9 @@ class OpenAIInferenceAdapter(OpenAIMixin):
     OpenAI Inference Adapter for OGX.
     """
 
+    # Cupola: an external provider — Cupola's call limits apply (cupola_limits.py).
+    cupola_call_limits: bool = True
+
     config: OpenAIConfig
 
     provider_data_api_key_field: str = "openai_api_key"

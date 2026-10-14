@@ -20,12 +20,19 @@ objects carry next to ``code`` and ``message``:
 The fields are omitted when unset, so every other error is serialized as
 before. The text is the provider's, uncleaned: a client that shows it to end
 users cleans it first.
+
+A provider that cannot be reached or does not answer in time is a provider
+error too (decision 2026-10-14): code ``provider_unreachable`` (HTTP 502) for a
+failed DNS lookup, a refused connection or a connect timeout, and code
+``provider_timeout`` (HTTP 504) for a read timeout or a Cupola call limit
+(``ProviderTimeoutError``, raised by providers/utils/inference/cupola_limits.py).
 """
 
 import json
 from typing import Any
 
-from openai import APIError
+import httpx
+from openai import APIConnectionError, APIError, APITimeoutError
 
 from ogx_api.common.errors import OpenAIErrorDetail, OpenAIErrorResponse
 
@@ -34,6 +41,69 @@ PROVIDER_MAX = 200
 GENERIC_MESSAGE = "The model provider returned an error."
 
 PROVIDER_ERROR_FIELDS = ("provider_status", "provider", "provider_detail")
+
+UNREACHABLE_CODE = "provider_unreachable"
+UNREACHABLE_MESSAGE = "The model provider could not be reached."
+TIMEOUT_CODE = "provider_timeout"
+TIMEOUT_MESSAGE = "The model provider did not answer in time."
+CONNECTION_CODES = (UNREACHABLE_CODE, TIMEOUT_CODE)
+
+
+class ProviderTimeoutError(Exception):
+    """Cupola: a call to an external model provider passed a Cupola limit.
+
+    ``phase`` is ``first_response`` (nothing from the provider in time),
+    ``idle`` (the stream went silent) or ``response`` (a whole answer without a
+    stream took too long); ``seconds`` is the limit.
+    """
+
+    def __init__(self, phase: str, seconds: float) -> None:
+        super().__init__(f"The model provider sent nothing for {seconds:g} s ({phase}).")
+        self.phase = phase
+        self.seconds = seconds
+
+
+def _cause_text(exc: BaseException) -> str:
+    """The innermost message of an exception chain (e.g. the DNS error)."""
+    text, seen = "", set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        if str(e).strip():
+            text = str(e).strip()
+        e = e.__cause__ or e.__context__
+    return text[:DETAIL_MAX]
+
+
+def _caused_by(exc: BaseException, kind: type[BaseException]) -> bool:
+    seen = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        if isinstance(e, kind):
+            return True
+        seen.add(id(e))
+        e = e.__cause__ or e.__context__
+    return False
+
+
+def _connection_error_fields(exc: BaseException) -> dict[str, Any] | None:
+    """The fields of a provider that could not be reached or did not answer."""
+    if isinstance(exc, ProviderTimeoutError):
+        status, code, message = 504, TIMEOUT_CODE, TIMEOUT_MESSAGE
+    elif isinstance(exc, APITimeoutError) and not _caused_by(exc, httpx.ConnectTimeout):
+        status, code, message = 504, TIMEOUT_CODE, TIMEOUT_MESSAGE
+    elif isinstance(exc, APIConnectionError):  # DNS, refused, connect timeout
+        status, code, message = 502, UNREACHABLE_CODE, UNREACHABLE_MESSAGE
+    else:
+        return None
+    return {
+        "provider_status": status,
+        "provider": None,
+        "provider_detail": _cause_text(exc) or None,
+        "message": message,
+        "code": code,
+        "type": None,
+    }
 
 
 def _text(v: Any) -> str:
@@ -49,9 +119,12 @@ def provider_error_fields(exc: BaseException) -> dict[str, Any] | None:
 
     Only an openai.APIError with a JSON object body is a provider error: an
     APIStatusError (the provider answered 4xx/5xx) or the APIError the SDK
-    raises for an ``error`` chunk inside a stream. A connection error has no
-    body and is not one.
+    raises for an ``error`` chunk inside a stream. A connection error (no body)
+    and a Cupola call limit are mapped by _connection_error_fields.
     """
+    conn = _connection_error_fields(exc)
+    if conn is not None:
+        return conn
     if not isinstance(exc, APIError):
         return None
     body = getattr(exc, "body", None)
