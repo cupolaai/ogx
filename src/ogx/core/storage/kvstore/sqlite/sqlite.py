@@ -5,6 +5,8 @@
 # the root directory of this source tree.
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 import aiosqlite
@@ -15,6 +17,17 @@ from ogx_api.internal.kvstore import KVStore
 from ..config import SqliteKVStoreConfig  # type: ignore[attr-defined]
 
 logger = get_logger(name=__name__, category="providers::utils")
+
+# CUPOLA BEGIN (faz8.0.584) — the model registry and the vector stores' file
+# contents share this file; indexing a document commits every part on its own,
+# and in SQLite's default rollback-journal mode each commit locks readers out:
+# a reader that kept losing for 5 s failed with "database is locked" (GET
+# /v1/models answered 500 during an index insert). WAL lets readers go on while
+# a writer commits — the settings the SQL store already uses
+# (sqlstore/sqlalchemy_sqlstore.py). WAL is kept in the file; the other two are
+# per connection.
+_CUPOLA_PER_CONNECTION_PRAGMAS = ("PRAGMA busy_timeout=5000", "PRAGMA synchronous=NORMAL")
+# CUPOLA END
 
 
 class SqliteKVStoreImpl(KVStore):
@@ -43,6 +56,16 @@ class SqliteKVStoreImpl(KVStore):
             return key[len(self._namespace) + 1 :]
         return key
 
+    # CUPOLA BEGIN (faz8.0.584) — every file connection waits 5 s and syncs NORMAL.
+    @asynccontextmanager
+    async def _connect(self) -> AsyncIterator[aiosqlite.Connection]:
+        async with aiosqlite.connect(self.db_path) as db:
+            for pragma in _CUPOLA_PER_CONNECTION_PRAGMAS:
+                await db.execute(pragma)
+            yield db
+
+    # CUPOLA END
+
     async def initialize(self) -> None:
         # Skip directory creation for in-memory databases and file: URIs
         if not self._is_memory_db() and not self.db_path.startswith("file:"):
@@ -66,7 +89,10 @@ class SqliteKVStoreImpl(KVStore):
             await self._conn.commit()
         else:
             # For file-based databases, just create the table
-            async with aiosqlite.connect(self.db_path) as db:
+            # CUPOLA (faz8.0.584): and switch the file to WAL (kept in the file;
+            # an existing rollback-journal file is converted here, at start).
+            async with self._connect() as db:
+                await db.execute("PRAGMA journal_mode=WAL")
                 await db.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {self.table_name} (
@@ -94,7 +120,7 @@ class SqliteKVStoreImpl(KVStore):
             )
             await self._conn.commit()
         else:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._connect() as db:  # CUPOLA (faz8.0.584)
                 await db.execute(
                     f"INSERT OR REPLACE INTO {self.table_name} (key, value, expiration) VALUES (?, ?, ?)",
                     (key, value, exp_str),
@@ -116,7 +142,7 @@ class SqliteKVStoreImpl(KVStore):
                     return None
                 return value
         else:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._connect() as db:  # CUPOLA (faz8.0.584)
                 async with db.execute(query, (key, now)) as cursor:
                     row = await cursor.fetchone()
                     if row is None:
@@ -133,7 +159,7 @@ class SqliteKVStoreImpl(KVStore):
             await self._conn.execute(f"DELETE FROM {self.table_name} WHERE key = ?", (key,))
             await self._conn.commit()
         else:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._connect() as db:  # CUPOLA (faz8.0.584)
                 await db.execute(f"DELETE FROM {self.table_name} WHERE key = ?", (key,))
                 await db.commit()
 
@@ -150,7 +176,7 @@ class SqliteKVStoreImpl(KVStore):
             async with self._conn.execute(query, (start_key, end_key, now)) as cursor:
                 return [row[0] async for row in cursor]
         else:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._connect() as db:  # CUPOLA (faz8.0.584)
                 async with db.execute(query, (start_key, end_key, now)) as cursor:
                     return [row[0] async for row in cursor]
 
@@ -168,7 +194,7 @@ class SqliteKVStoreImpl(KVStore):
             rows = await cursor.fetchall()
             return [self._strip_namespace(row[0]) for row in rows]
         else:
-            async with aiosqlite.connect(self.db_path) as db:
+            async with self._connect() as db:  # CUPOLA (faz8.0.584)
                 cursor = await db.execute(query, (start_key, end_key, now))
                 rows = await cursor.fetchall()
                 return [self._strip_namespace(row[0]) for row in rows]
