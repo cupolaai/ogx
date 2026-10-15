@@ -96,6 +96,34 @@ def _http_exception_from_sse_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=500, detail="Internal server error: An unexpected error occurred.")
 
 
+# CUPOLA BEGIN (faz8.0.576) — a client disconnect must close the provider's
+# connection. The chunk task below was awaited directly, so anyio's cancellation
+# (re-delivered every loop cycle) was forwarded into it again and again and cut
+# httpcore's own close of the provider stream half-way; httpcore had already
+# marked the stream closed, so the provider connection stayed open until the
+# provider finished. The chunk task is now awaited through asyncio.shield and,
+# on cancellation, cancelled ONCE; its clean-up runs uncut, for at most
+# _CUPOLA_CLEANUP_LIMIT seconds (then it is cancelled again).
+_CUPOLA_CLEANUP_LIMIT = 10.0
+_cupola_cleanups: set[asyncio.Task[Any]] = set()
+
+
+def _cupola_let_finish(task: asyncio.Task[Any]) -> None:
+    _cupola_cleanups.add(task)
+    limit = asyncio.get_running_loop().call_later(_CUPOLA_CLEANUP_LIMIT, task.cancel)
+
+    def done(t: asyncio.Task[Any]) -> None:
+        limit.cancel()
+        _cupola_cleanups.discard(t)
+        if not t.cancelled():
+            t.exception()  # retrieved: the client is gone, nothing to report to
+
+    task.add_done_callback(done)
+
+
+# CUPOLA END
+
+
 def _preserve_context_for_sse(event_gen: AsyncIterator[str]) -> AsyncIterator[str]:
     """Preserve request context for SSE streaming.
 
@@ -105,17 +133,24 @@ def _preserve_context_for_sse(event_gen: AsyncIterator[str]) -> AsyncIterator[st
     context = contextvars.copy_context()
 
     async def wrapper() -> AsyncIterator[str]:
+        task: asyncio.Task[str] | None = None  # CUPOLA
         try:
             while True:
                 try:
-                    task: asyncio.Task[str] = context.run(asyncio.create_task, event_gen.__anext__())  # type: ignore[arg-type]
-                    item = await task
+                    task = context.run(asyncio.create_task, event_gen.__anext__())  # type: ignore[arg-type]
+                    item: str = await asyncio.shield(task)  # CUPOLA: was `await task`
                 except StopAsyncIteration:
                     break
                 yield item
         except (asyncio.CancelledError, GeneratorExit):
-            if hasattr(event_gen, "aclose"):
-                await event_gen.aclose()
+            # CUPOLA BEGIN — cancel the running chunk task once and let its
+            # clean-up run; between chunks, close the generator in its own task.
+            if task is not None and not task.done():
+                task.cancel()
+                _cupola_let_finish(task)
+            elif hasattr(event_gen, "aclose"):
+                _cupola_let_finish(asyncio.ensure_future(event_gen.aclose()))
+            # CUPOLA END
             raise
 
     return wrapper()
