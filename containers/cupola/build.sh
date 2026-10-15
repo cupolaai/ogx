@@ -14,7 +14,9 @@
 #   2. the wheelhouse: exactly the files of image-lock.txt (by sha256),
 #      downloaded natively (no emulation), PyTorch CPU index for +cpu;
 #   3. tiktoken's cl100k_base, checked by sha256;
-#   4. the image (linux/amd64), 45-minute limit, every step timestamped.
+#   4. the image (linux/amd64), 45-minute limit, every step timestamped;
+#   5. with --push: the Cupola tests in the pushed image, by digest
+#      (containers/cupola/test.sh); if they fail, the image must not be pinned.
 set -eu
 
 TAG="${1:?usage: build.sh <tag, e.g. 1.1.3-cupola.9> [--push]}"
@@ -103,4 +105,13 @@ fi
 kill "$guard" 2>/dev/null || true
 grep -E "cupola image checks|^#[0-9]+ DONE" "$STAGE/build.log" | tail -25
 step "done: $IMAGE (commit $COMMIT)"
-if [ "$PUSH" = "--push" ]; then docker buildx imagetools inspect "$IMAGE" | head -3; fi
+if [ "$PUSH" = "--push" ]; then
+  docker buildx imagetools inspect "$IMAGE" | head -3
+  DIGEST="$(docker buildx imagetools inspect "$IMAGE" | awk '/^Digest:/ { print $2; exit }')"
+  step "then: Cupola tests in the pushed image ($IMAGE@$DIGEST)"
+  if ! "$HERE/test.sh" "$IMAGE@$DIGEST"; then
+    echo "build.sh: the tests failed in $IMAGE@$DIGEST — it is pushed but must NOT be pinned (ogxDefaultImage)" >&2
+    exit 1
+  fi
+  step "tests passed: $IMAGE@$DIGEST may be pinned"
+fi

@@ -40,7 +40,24 @@ image (checked by sha256), so the server never downloads it.
 (2) the wheelhouse — downloaded natively, the PyTorch CPU index for the `+cpu` packages, the file count checked
 against the lock, (3) tiktoken, (4) the `linux/amd64` image, timestamped, stopped after 45 minutes. The build-time
 checks (`pip check`, the starter distribution's requirements, the milvus family against `uv.lock`, imports, tiktoken
-offline) stop the build on any failure.
+offline) stop the build on any failure. With `--push`, `build.sh` then runs the Cupola tests in the pushed image by
+digest (below); if they fail it exits non-zero and that image must not be pinned.
+
+## Tests with the image's packages: `test.sh`
+
+```sh
+containers/cupola/test.sh cupola-cr.io/cupola/cupola-distribution-starter:1.1.3-cupola.N@sha256:...
+containers/cupola/test.sh <image> --postgres    # also the PostgreSQL tests
+```
+
+`uv.lock`'s development environment has older anyio / starlette / openai / uvicorn than the image, and Cupola's
+client-disconnect bugs reproduced only with the image's versions. `test.sh` runs the Cupola tests
+(`tests/unit/**/test_cupola_*.py` and the Cupola-changed `test_openai_base_url_config.py`) in a throwaway `linux/amd64`
+container of the image, without network (the network tests use `127.0.0.1` only): ogx and every third-party package
+come from the image, the test files from this checkout. The test-only packages are exactly the files of
+`test-lock.txt` (pytest, pytest-asyncio and their two dependencies, `uv.lock`'s versions, by sha256), installed into
+that container, never into the image. The PostgreSQL tests are skipped unless `--postgres` starts a throwaway postgres
+on an internal docker network. Upstream's tests keep running with `uv.lock` (`scripts/unit-tests.sh`), unchanged.
 
 ## Air-gapped clusters
 
