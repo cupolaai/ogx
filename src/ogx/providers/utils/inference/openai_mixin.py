@@ -337,25 +337,32 @@ class OpenAIMixin(NeedsRequestProviderData, ABC, BaseModel):
                 last_id = None
                 last_created = None
                 last_model = None
-                async for chunk in resp:
-                    if new_id:
-                        chunk.id = new_id
-                    if fix_usage and chunk.usage is not None:
-                        last_usage = chunk.usage
-                        last_id = chunk.id
-                        last_created = chunk.created
-                        last_model = chunk.model
-                        chunk.usage = None
-                    yield chunk
-                if fix_usage and last_usage is not None:
-                    yield ChatCompletionChunk(
-                        id=last_id,
-                        choices=[],
-                        created=last_created,
-                        model=last_model,
-                        object="chat.completion.chunk",
-                        usage=last_usage,
-                    )
+                try:
+                    async for chunk in resp:
+                        if new_id:
+                            chunk.id = new_id
+                        if fix_usage and chunk.usage is not None:
+                            last_usage = chunk.usage
+                            last_id = chunk.id
+                            last_created = chunk.created
+                            last_model = chunk.model
+                            chunk.usage = None
+                        yield chunk
+                    if fix_usage and last_usage is not None:
+                        yield ChatCompletionChunk(
+                            id=last_id,
+                            choices=[],
+                            created=last_created,
+                            model=last_model,
+                            object="chat.completion.chunk",
+                            usage=last_usage,
+                        )
+                finally:
+                    # Cupola: when the consumer stops (the client went away, a
+                    # Stop, an error), close the provider's stream — every
+                    # provider, in-cluster ones included — so it stops
+                    # generating; shielded from the consumer's cancellation.
+                    await cupola_limits.close_shielded(resp)
 
             return _gen()
         else:

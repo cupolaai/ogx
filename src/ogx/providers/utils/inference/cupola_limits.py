@@ -19,6 +19,13 @@ sets instead:
 - a whole answer without a stream within 110 s (under the 120 s the Cupola
   backend waits for one).
 
+A provider stream is closed when its consumer stops — the client went away, a
+Stop, an error — through close_shielded: the close runs in its own task, so a
+cancelled caller cannot cut it, and at most CLOSE_TIMEOUT seconds (2026-10-15:
+the client's disconnect never reached the provider, because the close was
+itself cancelled — anyio re-delivers the cancellation every loop cycle and
+asyncio forwards it to the task _preserve_context_for_sse awaits).
+
 A limit raises ProviderTimeoutError, which the API answers as
 ``provider_timeout`` (HTTP 504, or an error event inside a stream). In-cluster
 model servers (vLLM) are not limited: a large model on CPU may take long to
@@ -39,6 +46,10 @@ MAX_RETRIES = 1
 FIRST_RESPONSE_TIMEOUT = 180.0
 IDLE_TIMEOUT = 60.0
 NON_STREAM_TIMEOUT = 110.0
+CLOSE_TIMEOUT = 5.0
+
+# The close tasks still running; a reference keeps each alive until it ends.
+_closing: set[asyncio.Task[None]] = set()
 
 
 def client_params() -> dict[str, Any]:
@@ -79,8 +90,12 @@ async def call_with_limits(
     try:
         it, first, empty = await asyncio.wait_for(first_chunk(), first_response)
     except TimeoutError as e:
-        await _close(holder.get("resp"))
+        await close_shielded(holder.get("resp"))
         raise ProviderTimeoutError("first_response", first_response) from e
+    except BaseException:
+        # Cancelled while waiting (the client went away): close all the same.
+        await close_shielded(holder.get("resp"))
+        raise
 
     async def chunks() -> AsyncIterator[Any]:
         try:
@@ -96,17 +111,37 @@ async def call_with_limits(
                     raise ProviderTimeoutError("idle", idle) from e
                 yield chunk
         finally:
-            await _close(holder.get("resp"))
+            await close_shielded(holder.get("resp"))
 
     return chunks()
 
 
+async def close_shielded(resp: Any, timeout: float = CLOSE_TIMEOUT) -> None:
+    """Close a provider stream even while the caller is being cancelled.
+
+    The close runs in its own task: a cancelled caller gets its cancellation
+    back at once, the close goes on, for at most `timeout` seconds.
+    """
+    if resp is None:
+        return
+    task = asyncio.ensure_future(_close_within(resp, timeout))
+    _closing.add(task)
+    task.add_done_callback(_closing.discard)
+    await asyncio.shield(task)
+
+
+async def _close_within(resp: Any, timeout: float) -> None:
+    # A close that fails or hangs must not hide the real error or hang a task.
+    with contextlib.suppress(Exception):
+        await asyncio.wait_for(_close(resp), timeout)
+
+
 async def _close(resp: Any) -> None:
-    close = getattr(resp, "close", None)
+    # An async generator (a wrapped stream) closes with aclose(), the SDK's
+    # stream with close().
+    close = getattr(resp, "aclose", None) or getattr(resp, "close", None)
     if close is None:
         return
-    # Closing a dead stream must not hide the real error.
-    with contextlib.suppress(Exception):
-        result = close()
-        if asyncio.iscoroutine(result):
-            await result
+    result = close()
+    if asyncio.iscoroutine(result):
+        await result
