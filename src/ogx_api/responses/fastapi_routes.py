@@ -11,7 +11,6 @@ FastAPI route decorators.
 """
 
 import asyncio
-import contextvars
 import json
 import logging  # allow-direct-logging
 from collections.abc import AsyncIterator
@@ -22,6 +21,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ValidationError
 
 from ogx_api.common.responses import Order
+
+# CUPOLA BEGIN (faz8.0.576 L3) — Studio and Chat stream through this route, and
+# their Stop is a client disconnect. This module had its own copy of
+# _preserve_context_for_sse, which awaited the chunk task directly: anyio's
+# cancellation was forwarded into it on every loop cycle, cut httpcore's close of
+# the provider stream half-way and left the provider connection open until the
+# provider finished. The inference route's wrapper (1.1.3-cupola.13) cancels the
+# chunk task once and lets its clean-up run.
+from ogx_api.inference.fastapi_routes import _preserve_context_for_sse
+
+# CUPOLA END
 from ogx_api.openai_responses import (
     ListOpenAIResponseInputItem,
     ListOpenAIResponseObject,
@@ -190,28 +200,6 @@ async def get_list_response_input_items_request(
         limit=limit,
         order=order,
     )
-
-
-def _preserve_context_for_sse(event_gen: AsyncIterator[str]) -> AsyncIterator[str]:
-    # StreamingResponse runs in a different task, losing request contextvars.
-    # create_task inside context.run captures the context at task creation.
-    context = contextvars.copy_context()
-
-    async def wrapper() -> AsyncIterator[str]:
-        try:
-            while True:
-                try:
-                    task: asyncio.Task[str] = context.run(asyncio.create_task, event_gen.__anext__())  # type: ignore[arg-type]
-                    item = await task
-                except StopAsyncIteration:
-                    break
-                yield item
-        except (asyncio.CancelledError, GeneratorExit):
-            if hasattr(event_gen, "aclose"):
-                await event_gen.aclose()
-            raise
-
-    return wrapper()
 
 
 # Fields that the WebSocket response.create event forbids (they only apply to

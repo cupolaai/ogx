@@ -24,7 +24,9 @@ import uvicorn
 from fastapi import FastAPI
 
 from ogx.providers.utils.inference.model_registry import RemoteInferenceProviderConfig
+from ogx_api import OpenAIChatCompletionRequestWithExtraBody
 from ogx_api.inference.fastapi_routes import create_router
+from ogx_api.responses.fastapi_routes import create_router as create_responses_router
 from tests.unit.providers.utils.inference.openai_mixin_helpers import OpenAIMixinImpl
 
 CHUNK = {
@@ -87,9 +89,31 @@ class LimitedNetworkImpl(NetworkImpl):
     cupola_call_limits: bool = True
 
 
-async def _serve_and_disconnect(impl_cls, provider, after_chunks=2):
-    """The whole server path: uvicorn (h11) serving the real inference router; a raw
-    TCP client reads `after_chunks` chunks and closes its socket."""
+class StreamingResponses:
+    """A Responses implementation that streams the provider's answer the way the
+    builtin one does (consuming openai_chat_completion's stream in a generator), so
+    the Responses route is exercised over the real SDK, httpx and httpcore."""
+
+    def __init__(self, inference):
+        self.inference = inference
+
+    async def create_openai_response(self, request):
+        params = OpenAIChatCompletionRequestWithExtraBody(
+            model=request.model, messages=[{"role": "user", "content": "hi"}], stream=True
+        )
+        stream = await self.inference.openai_chat_completion(params)
+
+        async def events():
+            async for chunk in stream:
+                yield {"type": "response.output_text.delta", "delta": chunk.choices[0].delta.content}
+
+        return events()
+
+
+async def _serve_and_disconnect(impl_cls, provider, after_chunks=2, api="chat"):
+    """The whole server path: uvicorn (h11) serving the real inference router (or the
+    real Responses router, api="responses"); a raw TCP client reads `after_chunks`
+    chunks and closes its socket."""
     prov = await asyncio.start_server(provider.handle, "127.0.0.1", 0)
     prov_port = prov.sockets[0].getsockname()[1]
     impl = impl_cls(config=RemoteInferenceProviderConfig(), base=f"http://127.0.0.1:{prov_port}/v1")
@@ -99,7 +123,14 @@ async def _serve_and_disconnect(impl_cls, provider, after_chunks=2):
 
     impl.model_store = type("S", (), {"has_model": staticmethod(no_model)})()
     app = FastAPI()
-    app.include_router(create_router(impl))
+    if api == "responses":
+        app.include_router(create_responses_router(StreamingResponses(impl)))
+        path = b"/v1/responses"
+        request = {"model": "m", "input": "hi", "stream": True}
+    else:
+        app.include_router(create_router(impl))
+        path = b"/v1/chat/completions"
+        request = {"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True}
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     port = sock.getsockname()[1]
@@ -109,10 +140,10 @@ async def _serve_and_disconnect(impl_cls, provider, after_chunks=2):
         while not server.started:
             await asyncio.sleep(0.01)
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
-        body = json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}], "stream": True}).encode()
+        body = json.dumps(request).encode()
         writer.write(
-            b"POST /v1/chat/completions HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\n"
-            b"content-length: %d\r\n\r\n%s" % (len(body), body)
+            b"POST %s HTTP/1.1\r\nhost: x\r\ncontent-type: application/json\r\n"
+            b"content-length: %d\r\n\r\n%s" % (path, len(body), body)
         )
         await writer.drain()
         got = b""
@@ -142,6 +173,23 @@ async def test_a_client_disconnect_closes_the_provider_connection(impl_cls):
     closed, chunks = await _serve_and_disconnect(impl_cls, provider, after_chunks=2)
     assert provider.requests == 1 and chunks >= 2
     assert closed, "the client left and the provider connection stayed open"
+
+
+@pytest.mark.parametrize("impl_cls", [LimitedNetworkImpl, NetworkImpl], ids=["external-provider", "in-cluster"])
+async def test_a_client_disconnect_on_the_responses_route_closes_the_provider_connection(impl_cls):
+    # Studio and Chat stream through /v1/responses; their Stop is this disconnect
+    # (Cupola faz8.0.576 L3: on 1.1.3-cupola.13 the provider stream ran to its end).
+    provider = TCPProvider(every=1.0)
+    closed, chunks = await _serve_and_disconnect(impl_cls, provider, after_chunks=2, api="responses")
+    assert provider.requests == 1 and chunks >= 2
+    assert closed, "the client left /v1/responses and the provider connection stayed open"
+
+
+def test_the_responses_route_streams_through_the_inference_routes_wrapper():
+    import ogx_api.inference.fastapi_routes as inference_routes
+    import ogx_api.responses.fastapi_routes as responses_routes
+
+    assert responses_routes._preserve_context_for_sse is inference_routes._preserve_context_for_sse
 
 
 async def test_closing_between_chunks_closes_the_stream_in_its_own_task():
