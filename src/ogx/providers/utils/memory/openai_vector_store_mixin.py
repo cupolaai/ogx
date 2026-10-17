@@ -979,28 +979,37 @@ class OpenAIVectorStoreMixin(ABC):
         if vector_store_id not in self.openai_vector_stores:
             raise VectorStoreNotFoundError(vector_store_id)
 
-        store_info = self.openai_vector_stores[vector_store_id].copy()
+        # CUPOLA BEGIN (faz8.0.593) — the update takes the store's lock and starts from the
+        # store record as it is now. It copied the record, awaited the write and then put its
+        # copy back, so a file attached meanwhile (its file_ids entry, added under this lock)
+        # was overwritten: on back-to-back uploads OGX lost half of a store's files while their
+        # parts stayed searchable, and their indexing never showed as finished.
+        async with self._get_vector_store_lock(vector_store_id):
+            if vector_store_id not in self.openai_vector_stores:
+                raise VectorStoreNotFoundError(vector_store_id)
+            store_info = self.openai_vector_stores[vector_store_id].copy()
 
-        # Update fields if provided
-        if request.name is not None:
-            store_info["name"] = request.name
-        if request.expires_after is not None:
-            store_info["expires_after"] = (
-                request.expires_after.model_dump()
-                if hasattr(request.expires_after, "model_dump")
-                else request.expires_after
-            )
-        if request.metadata is not None:
-            store_info["metadata"] = request.metadata
+            # Update fields if provided
+            if request.name is not None:
+                store_info["name"] = request.name
+            if request.expires_after is not None:
+                store_info["expires_after"] = (
+                    request.expires_after.model_dump()
+                    if hasattr(request.expires_after, "model_dump")
+                    else request.expires_after
+                )
+            if request.metadata is not None:
+                store_info["metadata"] = request.metadata
 
-        # Update last_active_at
-        store_info["last_active_at"] = int(time.time())
+            # Update last_active_at
+            store_info["last_active_at"] = int(time.time())
 
-        # Save to persistent storage (provider-specific)
-        await self._update_openai_vector_store(vector_store_id, store_info)
+            # Save to persistent storage (provider-specific)
+            await self._update_openai_vector_store(vector_store_id, store_info)
 
-        # Update in-memory cache
-        self.openai_vector_stores[vector_store_id] = store_info
+            # Update in-memory cache
+            self.openai_vector_stores[vector_store_id] = store_info
+        # CUPOLA END
 
         return VectorStoreObject(**store_info)
 
@@ -1563,19 +1572,27 @@ class OpenAIVectorStoreMixin(ABC):
                 )
             )
 
-        store_info = self.openai_vector_stores[vector_store_id].copy()
-
         file = await self.openai_retrieve_vector_store_file(vector_store_id, file_id)
         await self._delete_openai_vector_store_file_from_storage(vector_store_id, file_id)
 
-        # Update in-memory cache
-        store_info["file_ids"].remove(file_id)
-        store_info["file_counts"][file.status] -= 1
-        store_info["file_counts"]["total"] -= 1
-        self.openai_vector_stores[vector_store_id] = store_info
+        # CUPOLA BEGIN (faz8.0.593) — like the attach and the update: under the store's lock,
+        # from the record as it is now, on copies of file_ids / file_counts. It took its copy
+        # before two awaits and changed the shared list in place, so an attach in between was
+        # lost or counted twice.
+        async with self._get_vector_store_lock(vector_store_id):
+            store_info = self.openai_vector_stores[vector_store_id].copy()
+            store_info["file_ids"] = store_info["file_ids"].copy()
+            store_info["file_counts"] = store_info["file_counts"].copy()
 
-        # Save updated vector store to persistent storage
-        await self._save_openai_vector_store(vector_store_id, store_info)
+            # Update in-memory cache
+            store_info["file_ids"].remove(file_id)
+            store_info["file_counts"][file.status] -= 1
+            store_info["file_counts"]["total"] -= 1
+            self.openai_vector_stores[vector_store_id] = store_info
+
+            # Save updated vector store to persistent storage
+            await self._save_openai_vector_store(vector_store_id, store_info)
+        # CUPOLA END
 
         return VectorStoreFileDeleteResponse(
             id=file_id,
