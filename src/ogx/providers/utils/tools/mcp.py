@@ -96,8 +96,9 @@ class MCPSessionManager:
     """
 
     def __init__(self):
-        # Cache of active sessions: key -> (session, client_context, session_context)
-        self._sessions: dict[str, tuple[ClientSession, Any, Any]] = {}
+        # Cache of active sessions: key -> (session, owner task, close event)
+        # CUPOLA (faz8.0.593): each session lives in an owner task, see _create_session.
+        self._sessions: dict[str, tuple[ClientSession, asyncio.Task[None], asyncio.Event]] = {}
         # Locks to prevent concurrent session creation for the same key
         self._locks: dict[str, asyncio.Lock] = {}
         # Global lock for managing the locks dict
@@ -143,114 +144,65 @@ class MCPSessionManager:
                 return session
 
             # Create new session
-            session, client_ctx, session_ctx = await self._create_session(endpoint, headers)
-            self._sessions[key] = (session, client_ctx, session_ctx)
+            session, owner, close = await self._create_session(endpoint, headers)
+            self._sessions[key] = (session, owner, close)
             logger.debug("Created new MCP session", endpoint=endpoint, key=key[:32])
             return session
 
-    async def _create_session(self, endpoint: str, headers: dict[str, str]) -> tuple[ClientSession, Any, Any]:
-        """Create a new MCP session.
+    # CUPOLA BEGIN (faz8.0.593) — one owner task per session. The MCP client
+    # (streamablehttp_client / sse_client) and ClientSession hold anyio task groups,
+    # which must be entered and exited in the same task. The session used to be
+    # entered by hand in the task that first needed it and exited in __aexit__, run by
+    # another task when a streamed response ended; anyio refused that exit ("different
+    # task", swallowed below), the client's cancel scope was never left, and anyio's
+    # _deliver_cancellation rescheduled itself on every loop turn — OGX burned a whole
+    # core, idle, after a single MCP call until it was restarted (Cupola faz8.0.593).
+    # Now an owner task enters client_wrapper (the same protocol fallback and error
+    # mapping as before), hands the session over and waits for the close signal, so
+    # the enter and the exit always happen in that one task; other tasks only use the
+    # session.
+    async def _own_session(
+        self,
+        endpoint: str,
+        headers: dict[str, str],
+        ready: asyncio.Future[ClientSession],
+        close: asyncio.Event,
+    ) -> None:
+        try:
+            async with client_wrapper(endpoint, headers) as session:
+                ready.set_result(session)
+                await close.wait()
+        except BaseException as e:
+            if not ready.done():
+                ready.set_exception(e)
+            else:
+                logger.debug("MCP session ended with an error", endpoint=endpoint, error=str(e))
+            if isinstance(e, asyncio.CancelledError):
+                raise
+
+    async def _create_session(
+        self, endpoint: str, headers: dict[str, str]
+    ) -> tuple[ClientSession, asyncio.Task[None], asyncio.Event]:
+        """Create a new MCP session in its own owner task.
 
         Returns:
-            Tuple of (session, client_context, session_context) for lifecycle management
+            Tuple of (session, owner task, close event) for lifecycle management
         """
-        # Use the same protocol detection logic as client_wrapper
-        connection_strategies = [MCPProtol.STREAMABLE_HTTP, MCPProtol.SSE]
-        mcp_protocol = protocol_cache.get(endpoint, default=MCPProtol.UNKNOWN)
-        if mcp_protocol == MCPProtol.SSE:
-            connection_strategies = [MCPProtol.SSE, MCPProtol.STREAMABLE_HTTP]
+        ready: asyncio.Future[ClientSession] = asyncio.get_running_loop().create_future()
+        close = asyncio.Event()
+        owner = asyncio.create_task(self._own_session(endpoint, headers, ready, close), name=f"mcp-session {endpoint}")
+        try:
+            session = await asyncio.shield(ready)
+        except BaseException:
+            # the setup failed (its error is re-raised here) or the caller was cancelled:
+            # let the owner leave the client in its own task
+            close.set()
+            if not ready.done():
+                owner.cancel()
+            raise
+        return session, owner, close
 
-        last_exception: BaseException | None = None
-
-        for i, strategy in enumerate(connection_strategies):
-            try:
-                client = streamablehttp_client
-                if strategy == MCPProtol.SSE:
-                    client = cast(Any, sse_client)
-
-                # Enter the client context manager manually
-                client_ctx = client(endpoint, headers=headers)
-                client_streams = await client_ctx.__aenter__()
-
-                try:
-                    # Enter the session context manager manually
-                    session = ClientSession(read_stream=client_streams[0], write_stream=client_streams[1])
-                    session_ctx = session
-                    await session.__aenter__()
-
-                    try:
-                        await session.initialize()
-                        protocol_cache[endpoint] = strategy
-                        return session, client_ctx, session_ctx
-                    except BaseException:
-                        await session.__aexit__(None, None, None)
-                        raise
-                except BaseException:
-                    await client_ctx.__aexit__(None, None, None)
-                    raise
-
-            except* httpx.HTTPStatusError as eg:
-                for exc in eg.exceptions:
-                    err = cast(httpx.HTTPStatusError, exc)
-                    if err.response.status_code == 401:
-                        raise AuthenticationRequiredError(exc) from exc
-                if i == len(connection_strategies) - 1:
-                    raise
-                last_exception = eg
-            except* httpx.ConnectError as eg:
-                if i == len(connection_strategies) - 1:
-                    error_msg = f"Failed to connect to MCP server at {endpoint}: Connection refused"
-                    logger.error("MCP connection error", error=error_msg)
-                    raise ConnectionError(error_msg) from eg
-                else:
-                    logger.warning(
-                        "failed to connect to MCP server at via , falling back to",
-                        endpoint=endpoint,
-                        name=strategy.name,
-                        connection_strategies_i_1_name=connection_strategies[i + 1].name,
-                    )
-                last_exception = eg
-            except* httpx.TimeoutException as eg:
-                if i == len(connection_strategies) - 1:
-                    error_msg = f"MCP server at {endpoint} timed out"
-                    logger.error("MCP timeout error", error=error_msg)
-                    raise TimeoutError(error_msg) from eg
-                else:
-                    logger.warning(
-                        "MCP server at timed out via , falling back to",
-                        endpoint=endpoint,
-                        name=strategy.name,
-                        connection_strategies_i_1_name=connection_strategies[i + 1].name,
-                    )
-                last_exception = eg
-            except* httpx.RequestError as eg:
-                if i == len(connection_strategies) - 1:
-                    exc_msg = str(eg.exceptions[0]) if eg.exceptions else "Unknown error"
-                    error_msg = f"Network error connecting to MCP server at {endpoint}: {exc_msg}"
-                    logger.error("MCP network error", error=error_msg)
-                    raise ConnectionError(error_msg) from eg
-                else:
-                    logger.warning(
-                        "network error connecting to MCP server at via , falling back to",
-                        endpoint=endpoint,
-                        name=strategy.name,
-                        connection_strategies_i_1_name=connection_strategies[i + 1].name,
-                    )
-                last_exception = eg
-            except* McpError:
-                if i < len(connection_strategies) - 1:
-                    logger.warning(
-                        "failed to connect via , falling back to",
-                        name=strategy.name,
-                        connection_strategies_i_1_name=connection_strategies[i + 1].name,
-                    )
-                else:
-                    raise
-
-        # Should not reach here, but just in case
-        if last_exception:
-            raise last_exception
-        raise RuntimeError(f"Failed to create MCP session for {endpoint}")
+    # CUPOLA END
 
     async def __aenter__(self):
         """Enter the async context manager."""
@@ -259,37 +211,24 @@ class MCPSessionManager:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Exit the async context manager and cleanup all sessions.
 
-        Note: We catch BaseException (not just Exception) because:
-        1. CancelledError is a BaseException and can occur during cleanup
-        2. anyio cancel scope errors can occur if cleanup runs in a different
-           task context than where the session was created
-        These are expected in streaming response scenarios and are handled gracefully.
+        CUPOLA (faz8.0.593): every session is closed by its own owner task (the task
+        that entered it); this only signals them and waits up to 5 s, so it may run in
+        any task — the end of a streamed response — and even when that task is being
+        cancelled (the owners still close: the signal is set before any wait).
         """
-        errors = []
         session_count = len(self._sessions)
-        for key, (session, client_ctx, _) in list(self._sessions.items()):
-            try:
-                await session.__aexit__(None, None, None)
-            except BaseException as e:
-                # Debug level since these errors are expected in streaming scenarios
-                # where cleanup runs in a different async context than session creation
-                logger.debug("Error closing MCP session", key=key, error=str(e))
-                errors.append(e)
-            try:
-                await client_ctx.__aexit__(None, None, None)
-            except BaseException as e:
-                logger.debug("Error closing MCP client context", key=key, error=str(e))
-                errors.append(e)
-
+        owners = []
+        for _, owner, close in self._sessions.values():
+            close.set()
+            owners.append(owner)
         self._sessions.clear()
         self._locks.clear()
+        if owners:
+            _, pending = await asyncio.wait(owners, timeout=5)
+            for owner in pending:
+                logger.debug("MCP session did not close in 5 s; cancelling its owner", task=owner.get_name())
+                owner.cancel()
         logger.debug("Closed MCP sessions", session_count=session_count)
-
-        if errors:
-            logger.debug(
-                "Encountered errors while closing MCP sessions (expected in streaming)", errors_count=len(errors)
-            )
-
         return False
 
 
