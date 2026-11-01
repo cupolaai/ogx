@@ -21,7 +21,29 @@
 #     official build (2026-06-24, APT_SNAPSHOT);
 #   - the same environment, entrypoint and directories.
 
-ARG BASE_IMAGE=docker.io/library/python@sha256:86d3e4424d5e963e60594a3a6b4d597cc4d41f5152fe67a97a40dca9ea092475
+# The base comes from the CUPOLA MIRROR, by tag AND digest (S-7, 2026-11-01).
+#
+# It used to be docker.io/library/python@sha256:86d3e442… — the 2026-06-24
+# publication of python:3.12.13-slim-trixie, pulled straight from Docker Hub.
+# Two problems with that:
+#   - an air-gapped site cannot build this image at all, because the base is
+#     not in the mirror. The PRODUCT was fine (customers pull the finished
+#     image from cupola-cr.io); the BUILD was not;
+#   - the 2026-06-24 digest predates the security rebuilds of the same tag.
+#
+# Same distribution, same version — only the digest moves forward to the
+# current publication of the SAME tag (3.12.13-slim-trixie). A distro or
+# version change is deliberately out of scope (list item S-7b).
+#
+# The mirror copy was made with `skopeo copy --all`, and its digest was
+# verified to be byte-identical to Docker Hub's with two independent tools
+# (skopeo raw-manifest sha256 and `docker buildx imagetools inspect`), 16 of 16
+# manifests preserved — so the index was NOT restructured on the way in
+# (docs/IMAGE-MIRROR-PLAN.md warns that `--all` sometimes does restructure).
+#
+# Keeping the tag next to the digest is for humans: the digest is what pulls,
+# the tag says what it is.
+ARG BASE_IMAGE=cupola-cr.io/library/python:3.12.13-slim-trixie@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 FROM ${BASE_IMAGE}
 
 ARG APT_SNAPSHOT=20260624T151000Z

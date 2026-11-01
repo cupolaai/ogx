@@ -2,6 +2,11 @@
 # Build Cupola's OGX distribution image from this fork's source.
 #
 #   containers/cupola/build.sh <tag> [--push]
+#
+# BASE_IMAGE overrides the base (default: the Cupola mirror's
+# python:3.12.13-slim-trixie, by digest). An air-gapped site can point it at
+# its own registry; it must NOT be a docker.io path, or the build needs the
+# internet.
 #   e.g. containers/cupola/build.sh 1.1.3-cupola.9          (local image, --load)
 #        containers/cupola/build.sh 1.1.3-cupola.9 --push   (to cupola-cr.io)
 #
@@ -23,10 +28,21 @@ TAG="${1:?usage: build.sh <tag, e.g. 1.1.3-cupola.9> [--push]}"
 PUSH="${2:-}"
 IMAGE="cupola-cr.io/cupola/cupola-distribution-starter:${TAG}"
 VERSION="1.1.3+${TAG#1.1.3-}"            # 1.1.3-cupola.9 -> 1.1.3+cupola.9
+# The base image, overridable but defaulting to the CUPOLA MIRROR (S-7,
+# 2026-11-01). It is passed to the build explicitly rather than left to the
+# Containerfile's own default, so the build log shows which base was pulled and
+# an air-gapped site can point this at its own registry without editing the
+# Containerfile. Keep it a mirror path: a docker.io default would make the
+# build need the internet, which is what S-7 closed.
+BASE_IMAGE="${BASE_IMAGE:-cupola-cr.io/library/python:3.12.13-slim-trixie@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36}"
 LIMIT_SECONDS=2700
 TIKTOKEN_URL="https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
 TIKTOKEN_SHA256="223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"
-PY="docker.io/library/python@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e"  # python:3.12.13-slim-trixie of 2026-06-24, all platforms (native here)
+# The helper container the download/prepare steps run in. It is the SAME image
+# as the build's base, so there is one base to keep current instead of two
+# digests drifting apart — and like the base it now comes from the Cupola
+# mirror, so no step of this build reaches docker.io (S-7, 2026-11-01).
+PY="$BASE_IMAGE"
 
 ROOT="$(git rev-parse --show-toplevel)"
 HERE="$ROOT/containers/cupola"
@@ -93,6 +109,7 @@ cp -R "$HERE/checks" "$STAGE/ctx/checks"
 if [ "$PUSH" = "--push" ]; then OUT="--push"; else OUT="--load"; fi
 docker buildx build --platform linux/amd64 --progress plain \
   --build-arg OGX_VERSION="$VERSION" --build-arg OGX_COMMIT="$COMMIT" \
+  --build-arg BASE_IMAGE="$BASE_IMAGE" \
   -f "$STAGE/ctx/Containerfile" -t "$IMAGE" $OUT "$STAGE/ctx" > "$STAGE/build.log" 2>&1 &
 pid=$!
 ( sleep "$LIMIT_SECONDS"; kill "$pid" 2>/dev/null && echo "build.sh: stopped after ${LIMIT_SECONDS}s" >&2 ) &
