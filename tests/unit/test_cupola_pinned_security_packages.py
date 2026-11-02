@@ -53,6 +53,13 @@ PINNED_FLOORS = {
     "aiohttp": "3.14.4",
     "pymongo": "4.18.3",
     "pyasn1": "0.6.4",
+    # S-7c (2026-11-02): both CVEs were published AFTER the 2026-10-30 patch,
+    # so cupola.18 still shipped them. anyio carries CVE-2026-63374 below
+    # 4.14.2; certifi carries GHSA-6q48-6c7w-9gw2 below 2026.10.18 (a
+    # compromised root staying in the trust store — it reaches every outbound
+    # TLS call OGX makes, which is why it is pinned rather than accepted).
+    "anyio": "4.14.2",
+    "certifi": "2026.10.18",
 }
 
 
