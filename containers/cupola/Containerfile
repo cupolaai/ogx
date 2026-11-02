@@ -31,22 +31,43 @@
 #     image from cupola-cr.io); the BUILD was not;
 #   - the 2026-06-24 digest predates the security rebuilds of the same tag.
 #
-# Same distribution, same version — only the digest moves forward to the
-# current publication of the SAME tag (3.12.13-slim-trixie). A distro or
-# version change is deliberately out of scope (list item S-7b).
+# S-7b option (a), 2026-11-02: the base moves to the next POINT RELEASE of the
+# same line and APT_SNAPSHOT moves with it. Measured reason: raising the base
+# digest alone did NOT move a single Debian CVE (19 CRITICAL / 558 HIGH before
+# and after cupola.18), because the system packages are installed from a FIXED
+# apt snapshot below — 2026-06-24. The snapshot is what pins the Debian
+# packages, so it is the thing that had to move.
 #
-# The mirror copy was made with `skopeo copy --all`, and its digest was
-# verified to be byte-identical to Docker Hub's with two independent tools
-# (skopeo raw-manifest sha256 and `docker buildx imagetools inspect`), 16 of 16
-# manifests preserved — so the index was NOT restructured on the way in
-# (docs/IMAGE-MIRROR-PLAN.md warns that `--all` sometimes does restructure).
+# Still the same distribution and the same Python minor: Debian trixie 13.7
+# (was 13.x of 2026-06-24) and Python 3.12.16 (was 3.12.13). Both values are
+# read FROM THE OFFICIAL IMAGE, not guessed: its own
+# /etc/apt/sources.list.d/debian.sources names snapshot 20261027T000000Z, and
+# `python3 -V` / `/etc/debian_version` inside it report 3.12.16 / 13.7. Moving
+# to the next Debian LINE (trixie -> forky) stays out of scope: that changes
+# the glibc/OpenSSL generation under every wheel.
+#
+# The mirror copy of 3.12.16 was made with `docker buildx imagetools create`
+# (docs/IMAGE-MIRROR-PLAN.md:570 lists it as an acceptable equivalent):
+# `skopeo copy --all` is the documented default and was tried first, but the
+# push credential for cupola-cr.io lives in the macOS keychain, which skopeo
+# cannot read, while buildx goes through the Docker credential helper. The
+# 3.12.13 copy before it was made with skopeo.
+#
+# Its digest was verified byte-identical to Docker Hub's with two independent
+# tools (skopeo raw-manifest sha256 and `docker buildx imagetools inspect`),
+# 16 of 16 manifests preserved — so the index was NOT restructured on the way
+# in (docs/IMAGE-MIRROR-PLAN.md warns that a mirror copy sometimes does
+# restructure, which is why this is checked rather than assumed).
+#
+# No /etc/hosts CF-bypass was needed: the largest layer is 28.5 MB, well under
+# Cloudflare's 100 MB body limit (measured before the push).
 #
 # Keeping the tag next to the digest is for humans: the digest is what pulls,
 # the tag says what it is.
-ARG BASE_IMAGE=cupola-cr.io/library/python:3.12.13-slim-trixie@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+ARG BASE_IMAGE=cupola-cr.io/library/python:3.12.16-slim-trixie@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30
 FROM ${BASE_IMAGE}
 
-ARG APT_SNAPSHOT=20260624T151000Z
+ARG APT_SNAPSHOT=20261027T000000Z
 ARG OGX_VERSION
 ARG OGX_COMMIT
 

@@ -4,7 +4,7 @@
 #   containers/cupola/build.sh <tag> [--push]
 #
 # BASE_IMAGE overrides the base (default: the Cupola mirror's
-# python:3.12.13-slim-trixie, by digest). An air-gapped site can point it at
+# python:3.12.16-slim-trixie, by digest). An air-gapped site can point it at
 # its own registry; it must NOT be a docker.io path, or the build needs the
 # internet.
 #   e.g. containers/cupola/build.sh 1.1.3-cupola.9          (local image, --load)
@@ -34,7 +34,7 @@ VERSION="1.1.3+${TAG#1.1.3-}"            # 1.1.3-cupola.9 -> 1.1.3+cupola.9
 # an air-gapped site can point this at its own registry without editing the
 # Containerfile. Keep it a mirror path: a docker.io default would make the
 # build need the internet, which is what S-7 closed.
-BASE_IMAGE="${BASE_IMAGE:-cupola-cr.io/library/python:3.12.13-slim-trixie@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36}"
+BASE_IMAGE="${BASE_IMAGE:-cupola-cr.io/library/python:3.12.16-slim-trixie@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30}"
 LIMIT_SECONDS=2700
 TIKTOKEN_URL="https://openaipublic.blob.core.windows.net/encodings/cl100k_base.tiktoken"
 TIKTOKEN_SHA256="223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7"

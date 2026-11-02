@@ -22,7 +22,7 @@ set -eu
 
 IMAGE="${1:?usage: test.sh <image> [--postgres]}"
 POSTGRES="${2:-}"
-PY="docker.io/library/python@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e"  # python:3.12.13-slim-trixie, as build.sh
+PY="${BASE_IMAGE:-cupola-cr.io/library/python:3.12.16-slim-trixie@sha256:b18b261e1b4974b4f321451ad5251ded85abb22c2b8b262da527dda1d031ab30}"  # the mirror base, as build.sh (BASE_IMAGE overrides)
 PG="docker.io/library/postgres@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3"   # postgres:17
 
 ROOT="$(git rev-parse --show-toplevel)"
