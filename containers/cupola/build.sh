@@ -45,8 +45,26 @@ TIKTOKEN_SHA256="223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a
 PY="$BASE_IMAGE"
 
 ROOT="$(git rev-parse --show-toplevel)"
-HERE="$ROOT/containers/cupola"
 step() { echo "[$(date -u +%H:%M:%S)] $*"; }
+
+# HERE is set AFTER the staging clone, to point INSIDE it (user, 2026-11-03).
+#
+# It used to be "$ROOT/containers/cupola" — the working tree under
+# ~/Documents, which iCloud syncs and whose file permissions iCloud rewrites.
+# Measured: 3970 files in this clone carry 0600 while git records 100644.
+# Lines further down copy the Containerfile, image-lock.txt and checks/ from
+# HERE into the build context, so those modes would travel into the image.
+#
+# That is exactly how cupola-dspo:v1.0.22 shipped unreadable templates and
+# broke every DSPA reconcile. This image was not affected (the 2026-11-03
+# audit found 0 restricted paths in 1.1.3-cupola.19), but relying on "the
+# files we happen to copy are the ones iCloud happens not to touch" is not a
+# guarantee.
+#
+# `git clone` restores the modes git records — verified here: a file that is
+# 0600 in the working tree comes out 0644 in the clone. The staging clone at
+# $STAGE/src already existed for the wheel build; HERE now points into it, so
+# every file that reaches the image comes from git, not from iCloud.
 
 if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
   echo "build.sh: the working tree is not clean; the image is built from committed source" >&2
@@ -60,6 +78,7 @@ step "commit $COMMIT, version $VERSION, staging $STAGE"
 step "1/4 ogx + ogx-api wheels from git (sdist -> wheel)"
 git clone -q "$ROOT" "$STAGE/src"
 git -C "$STAGE/src" checkout -q "$COMMIT"
+HERE="$STAGE/src/containers/cupola"
 mkdir -p "$STAGE/ctx/ogx-wheels"
 docker run --rm -v "$STAGE:/s" -w /tmp \
   -e PIP_CONSTRAINT=/s/src/containers/cupola/build-constraints.txt \
@@ -104,7 +123,7 @@ curl -fsSL "$TIKTOKEN_URL" -o "$STAGE/ctx/tiktoken/$name"
   echo "build.sh: cl100k_base sha256 differs" >&2; exit 1; }
 
 step "4/4 image $IMAGE"
-cp "$HERE/Containerfile" "$HERE/image-lock.txt" "$ROOT/uv.lock" "$STAGE/ctx/"
+cp "$HERE/Containerfile" "$HERE/image-lock.txt" "$STAGE/src/uv.lock" "$STAGE/ctx/"
 cp -R "$HERE/checks" "$STAGE/ctx/checks"
 if [ "$PUSH" = "--push" ]; then OUT="--push"; else OUT="--load"; fi
 docker buildx build --platform linux/amd64 --progress plain \
